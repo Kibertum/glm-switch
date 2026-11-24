@@ -1,0 +1,49 @@
+name: Build and release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Validate release version
+        shell: pwsh
+        run: |
+          [xml]$project = Get-Content .\GLMSwitchApp.csproj
+          $projectVersion = $project.Project.PropertyGroup.Version | Select-Object -First 1
+          $tagVersion = $env:GITHUB_REF_NAME -replace '^v', ''
+          if ($tagVersion -ne $projectVersion) {
+            throw "Release tag version $tagVersion does not match project version $projectVersion."
+          }
+
+      - name: Publish Windows application
+        run: dotnet publish .\GLMSwitchApp.csproj -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -o .\artifacts\publish
+
+      - name: Run self-test
+        shell: pwsh
+        run: '& ".\artifacts\publish\GLM Switch.exe" --self-test'
+
+      - name: Name release asset
+        shell: pwsh
+        run: |
+          $asset = "GLM-Switch-$env:GITHUB_REF_NAME.exe"
+          Copy-Item ".\artifacts\publish\GLM Switch.exe" ".\artifacts\$asset"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$env:GITHUB_REF_NAME" ".\artifacts\GLM-Switch-$env:GITHUB_REF_NAME.exe" --title "GLM Switch $env:GITHUB_REF_NAME" --generate-notes
