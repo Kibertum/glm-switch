@@ -24,7 +24,7 @@
 
 Пока GLM включён, активный ключ находится в `%USERPROFILE%\.claude\settings.json` в открытом виде: расширению Claude Code нужно прочитать его при запуске. Нажатие **Вернуть Claude** удаляет этот переопределённый ключ, но оставляет зашифрованный профиль. Не публикуйте `settings.json` и его резервные копии.
 
-Настройки GLM: `https://api.z.ai/api/anthropic`, модели `glm-5.3[1m]` и `glm-5.3-flash[1m]`. Идентификаторы моделей взяты из рабочего примера и могут зависеть от доступности в плане Z.AI.
+Настройки GLM: `https://api.z.ai/api/anthropic`. Перед переключением приложение автоматически запрашивает список доступных моделей через API Z.AI и выбирает актуальную основную GLM-модель для Sonnet/Opus и Flash-модель для Haiku. Если API недоступен, используются резервные идентификаторы `glm-5.3[1m]` и `glm-5.3-flash[1m]`.
 
 ### Где получить ключ
 
@@ -72,7 +72,7 @@ A small Windows utility that switches the official Claude Code for VS Code exten
 
 While GLM is enabled, the active key is stored in plain text in `%USERPROFILE%\.claude\settings.json` so the Claude Code extension can read it at startup. **Restore Claude** removes that override but keeps the encrypted profile. Do not publish `settings.json` or its backups.
 
-GLM settings: `https://api.z.ai/api/anthropic`, using models `glm-5.3[1m]` and `glm-5.3-flash[1m]`. These model identifiers come from the working example and may depend on availability in your Z.AI plan.
+GLM settings: `https://api.z.ai/api/anthropic`. Before switching, the app automatically queries Z.AI for available models and selects the newest primary GLM model for Sonnet/Opus and the newest Flash model for Haiku. If the API is unavailable, it falls back to `glm-5.3[1m]` and `glm-5.3-flash[1m]`.
 
 ### Getting an API key
 

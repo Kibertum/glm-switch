@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -32,7 +33,7 @@ internal sealed class MainForm : Form
 
     public MainForm()
     {
-        Text = "GLM Switch 0.1";
+        Text = "GLM Switch 0.2";
         Width = 510;
         Height = 405;
         FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -258,6 +259,8 @@ internal sealed class MainForm : Form
 internal sealed class SettingsSwitcher
 {
     private const string BaseUrl = "https://api.z.ai/api/anthropic";
+    private const string FallbackSonnetModel = "glm-5.3[1m]";
+    private const string FallbackHaikuModel = "glm-5.3-flash[1m]";
     private const string StateFileName = "active-state.dat";
     private const string KeyStoreFileName = "glm-keys.dat";
     private const string LegacyKeyFileName = "glm-key.dat";
@@ -369,6 +372,9 @@ internal sealed class SettingsSwitcher
         }
 
         var apiKey = FindKey(selectedName);
+        var models = DiscoverModels(apiKey);
+        var sonnetModel = models.SonnetModel ?? FallbackSonnetModel;
+        var haikuModel = models.HaikuModel ?? FallbackHaikuModel;
         var settings = ReadSettings();
         if (!File.Exists(_statePath))
         {
@@ -388,9 +394,9 @@ internal sealed class SettingsSwitcher
         var targetEnv = EnsureEnvObject(settings);
         targetEnv["ANTHROPIC_AUTH_TOKEN"] = apiKey;
         targetEnv["ANTHROPIC_BASE_URL"] = BaseUrl;
-        targetEnv["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = "glm-5.3-flash[1m]";
-        targetEnv["ANTHROPIC_DEFAULT_SONNET_MODEL"] = "glm-5.3[1m]";
-        targetEnv["ANTHROPIC_DEFAULT_OPUS_MODEL"] = "glm-5.3[1m]";
+        targetEnv["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = haikuModel;
+        targetEnv["ANTHROPIC_DEFAULT_SONNET_MODEL"] = sonnetModel;
+        targetEnv["ANTHROPIC_DEFAULT_OPUS_MODEL"] = sonnetModel;
         targetEnv["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = "1000000";
         targetEnv["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1";
         targetEnv["API_TIMEOUT_MS"] = "3000000";
@@ -551,6 +557,148 @@ internal sealed class SettingsSwitcher
         return entry?.Key ?? throw new InvalidOperationException("Выбранный ключ не найден. Обновите список.");
     }
 
+    private static DiscoveredModels DiscoverModels(string apiKey)
+    {
+        var candidates = new[]
+        {
+            BaseUrl + "/v1/models",
+            "https://api.z.ai/api/coding/paas/v4/models",
+            "https://api.z.ai/api/paas/v4/models"
+        };
+
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
+        foreach (var endpoint in candidates)
+        {
+            try
+            {
+                using var request = new HttpRequestMessage(HttpMethod.Get, endpoint);
+                request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+                request.Headers.Add("x-api-key", apiKey);
+
+                using var response = http.Send(request);
+                if (!response.IsSuccessStatusCode)
+                {
+                    continue;
+                }
+
+                var root = JsonNode.Parse(response.Content.ReadAsStream()) as JsonObject;
+                var ids = CollectModelIds(root);
+                if (ids.Count == 0)
+                {
+                    continue;
+                }
+
+                var glmIds = ids
+                    .Where(id => id.Contains("glm", StringComparison.OrdinalIgnoreCase))
+                    .Where(id => !id.Contains("embedding", StringComparison.OrdinalIgnoreCase))
+                    .Where(id => !id.Contains("rerank", StringComparison.OrdinalIgnoreCase))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+
+                var flash = glmIds
+                    .Where(id => id.Contains("flash", StringComparison.OrdinalIgnoreCase)
+                        || id.Contains("lite", StringComparison.OrdinalIgnoreCase))
+                    .OrderByDescending(GetModelVersion)
+                    .ThenByDescending(id => id, StringComparer.OrdinalIgnoreCase)
+                    .FirstOrDefault();
+
+                var primary = glmIds
+                    .Where(id => flash is null || !string.Equals(id, flash, StringComparison.OrdinalIgnoreCase))
+                    .Where(id => !id.Contains("flash", StringComparison.OrdinalIgnoreCase)
+                        && !id.Contains("lite", StringComparison.OrdinalIgnoreCase))
+                    .OrderByDescending(GetModelVersion)
+                    .ThenByDescending(id => id, StringComparer.OrdinalIgnoreCase)
+                    .FirstOrDefault();
+
+                return new DiscoveredModels(
+                    NormalizeModelId(primary),
+                    NormalizeModelId(flash));
+            }
+            catch (HttpRequestException)
+            {
+            }
+            catch (TaskCanceledException)
+            {
+            }
+            catch (IOException)
+            {
+            }
+            catch (JsonException)
+            {
+            }
+        }
+
+        return new DiscoveredModels(null, null);
+    }
+
+    private static List<string> CollectModelIds(JsonObject? root)
+    {
+        var ids = new List<string>();
+        if (root is null)
+        {
+            return ids;
+        }
+
+        if (root["data"] is JsonArray data)
+        {
+            foreach (var item in data)
+            {
+                if (item is JsonObject model && model["id"] is JsonValue id)
+                {
+                    ids.Add(id.GetValue<string>());
+                }
+            }
+        }
+
+        if (ids.Count == 0 && root["models"] is JsonArray models)
+        {
+            foreach (var item in models)
+            {
+                if (item is JsonObject model && model["id"] is JsonValue id)
+                {
+                    ids.Add(id.GetValue<string>());
+                }
+            }
+        }
+        return ids;
+    }
+
+    private static Version GetModelVersion(string modelId)
+    {
+        var match = System.Text.RegularExpressions.Regex.Match(
+            modelId, @"(?i)glm-?(?<version>\d+(?:[.-]\d+)*)");
+        if (!match.Success)
+        {
+            return new Version(0, 0);
+        }
+
+        var parts = match.Groups["version"].Value.Split('.', '-')
+            .Select(part => int.TryParse(part, out var number) ? number : 0)
+            .Take(4)
+            .ToArray();
+        return parts.Length switch
+        {
+            1 => new Version(parts[0], 0),
+            2 => new Version(parts[0], parts[1]),
+            3 => new Version(parts[0], parts[1], parts[2]),
+            _ => parts.Length >= 4
+                ? new Version(parts[0], parts[1], parts[2], parts[3])
+                : new Version(0, 0)
+        };
+    }
+
+    private static string NormalizeModelId(string? modelId)
+    {
+        if (string.IsNullOrWhiteSpace(modelId))
+        {
+            return modelId ?? string.Empty;
+        }
+
+        return modelId.Contains('[', StringComparison.Ordinal)
+            ? modelId
+            : modelId + "[1m]";
+    }
+
     private void WriteSettings(JsonObject settings)
     {
         var directory = Path.GetDirectoryName(_settingsPath)
@@ -621,6 +769,7 @@ internal sealed class SettingsSwitcher
         bool OriginalEnvWasNull,
         Dictionary<string, string> OriginalValues);
     private sealed record SavedKey(string Name, string Key);
+    private sealed record DiscoveredModels(string? SonnetModel, string? HaikuModel);
 
     public static void RunSelfTest()
     {
